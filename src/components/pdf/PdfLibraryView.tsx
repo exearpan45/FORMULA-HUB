@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   FileText,
   Download,
@@ -26,6 +26,21 @@ export const PdfLibraryView: React.FC = () => {
   const { activeExam } = useApp();
 
   const [documents, setDocuments] = useState<PdfDocument[]>(INITIAL_PDF_CATALOG);
+
+  // Synchronise published documents with the admin API; retain bundled catalogue as an offline fallback.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch('/api/public/pdfs', { signal: controller.signal, cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('PDF catalogue API unavailable');
+        const payload = await response.json();
+        if (Array.isArray(payload.documents)) setDocuments(payload.documents);
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') console.warn('Using bundled PDF catalogue:', error);
+      });
+    return () => controller.abort();
+  }, []);
   const [selectedSubject, setSelectedSubject] = useState<Subject | 'All' | 'Bundles'>('All');
   const [selectedClass, setSelectedClass] = useState<'All' | '11' | '12' | 'Combined'>('All');
   const [examFilter, setExamFilter] = useState<ExamType | 'All'>(activeExam);
@@ -66,13 +81,26 @@ export const PdfLibraryView: React.FC = () => {
   };
 
   const handleDownload = (doc: PdfDocument) => {
-    // Find formulas for this document
-    let formulas = ALL_FORMULAS;
-    if (doc.chapter) {
-      formulas = ALL_FORMULAS.filter((f) => f.chapter.toLowerCase() === doc.chapter?.toLowerCase());
-    } else if (doc.subject !== 'Combined') {
-      formulas = ALL_FORMULAS.filter((f) => f.subject === doc.subject);
+    const activeVersion = doc.versions?.find((version) => version.versionNumber === doc.currentVersion);
+    if (activeVersion?.fileData?.startsWith('data:application/pdf')) {
+      const link = window.document.createElement('a');
+      link.href = activeVersion.fileData;
+      link.download = doc.id + '-v' + doc.currentVersion + '.pdf';
+      link.click();
+      return;
     }
+    if (activeVersion?.fileUrl) {
+      const link = window.document.createElement('a');
+      link.href = activeVersion.fileUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.download = doc.id + '-v' + doc.currentVersion + '.pdf';
+      link.click();
+      return;
+    }
+    let formulas = ALL_FORMULAS;
+    if (doc.chapter) formulas = ALL_FORMULAS.filter((f) => f.chapter.toLowerCase() === doc.chapter?.toLowerCase());
+    else if (doc.subject !== 'Combined') formulas = ALL_FORMULAS.filter((f) => f.subject === doc.subject);
     downloadPdf(doc, formulas);
   };
 
