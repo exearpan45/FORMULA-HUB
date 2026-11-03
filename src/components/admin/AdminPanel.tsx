@@ -145,80 +145,64 @@ export const AdminPanel: React.FC = () => {
     sessionStorage.removeItem('formula_hub_admin_user');
   };
 
-  // Handle Upload / Replace Submit
+  // Upload the real selected PDF and report actual browser upload progress.
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setUploadError(null);
-    setUploadProgress(10);
-
+    if (!selectedFile) { setUploadError('Choose a PDF file before uploading.'); return; }
+    if (selectedFile.type !== 'application/pdf' && !selectedFile.name.toLowerCase().endsWith('.pdf')) {
+      setUploadError('Only PDF documents are accepted.'); return;
+    }
+    if (selectedFile.size < 8 || selectedFile.size > 20 * 1024 * 1024) {
+      setUploadError('PDF must be between 8 bytes and 20 MB.'); return;
+    }
+    setUploadProgress(0);
     const isReplacing = !!replaceTargetDoc;
-
     try {
-      // Simulate stepped upload progress
-      const timer = setInterval(() => {
-        setUploadProgress((prev) => {
-          if (prev === null || prev >= 90) return prev;
-          return prev + 25;
-        });
-      }, 200);
-
-      const endpoint = isReplacing
-        ? `/api/admin/pdfs/${replaceTargetDoc.id}/replace`
-        : '/api/admin/pdfs/upload';
-      const method = isReplacing ? 'PUT' : 'POST';
-
-      const payload = isReplacing
-        ? {
-            versionNumber: formVersion,
-            updateNotes: formNotes,
-            fileSize: selectedFile ? selectedFile.size : 1240000,
-            pageCount: 12,
-            fileData: '%PDF-1.4 simulated upload stream',
-          }
-        : {
-            title: formTitle,
-            description: formDescription,
-            subject: formSubject,
-            class: formClass,
-            chapter: formChapter,
-            category: formCategory,
-            versionNumber: formVersion,
-            updateNotes: formNotes,
-            fileSize: selectedFile ? selectedFile.size : 1100000,
-            pageCount: 10,
-            fileData: '%PDF-1.4 verified stream',
-          };
-
-      const res = await fetch(endpoint, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
+      const header = new TextDecoder().decode(await selectedFile.slice(0, 5).arrayBuffer());
+      if (header !== '%PDF-') throw new Error('The selected file does not contain a valid PDF header.');
+      const fileData = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Unable to read selected PDF.'));
+        reader.onerror = () => reject(new Error('Unable to read selected PDF.'));
+        reader.readAsDataURL(selectedFile);
       });
-
-      clearInterval(timer);
+      const endpoint = isReplacing ? '/api/admin/pdfs/' + replaceTargetDoc.id + '/replace' : '/api/admin/pdfs/upload';
+      const payload = isReplacing ? {
+        versionNumber: formVersion, updateNotes: formNotes, fileSize: selectedFile.size, pageCount: 0, fileData
+      } : {
+        title: formTitle, description: formDescription, subject: formSubject, class: formClass,
+        chapter: formChapter, category: formCategory, versionNumber: formVersion, updateNotes: formNotes,
+        fileSize: selectedFile.size, pageCount: 0, fileData
+      };
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(isReplacing ? 'PUT' : 'POST', endpoint);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) setUploadProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+        };
+        xhr.onerror = () => reject(new Error('Network error while uploading the PDF.'));
+        xhr.onload = () => {
+          let result: any = {};
+          try { result = JSON.parse(xhr.responseText || '{}'); } catch { reject(new Error('Server returned an unreadable response.')); return; }
+          if (xhr.status < 200 || xhr.status >= 300) { reject(new Error(result.error || 'PDF upload failed (' + xhr.status + ').')); return; }
+          resolve();
+        };
+        xhr.send(JSON.stringify(payload));
+      });
       setUploadProgress(100);
-
-      const data = await res.json();
-      if (!res.ok) {
-        setUploadError(data.error || 'Upload failed');
-      } else {
-        setTimeout(() => {
-          setUploadProgress(null);
-          setUploadModalOpen(false);
-          setReplaceTargetDoc(null);
-          setSelectedFile(null);
-          fetchAdminData();
-        }, 500);
-      }
-    } catch (err: any) {
-      setUploadError(err.message || 'Network error during upload');
+      await fetchAdminData();
+      setUploadModalOpen(false);
+      setReplaceTargetDoc(null);
+      setSelectedFile(null);
+      setUploadProgress(null);
+    } catch (error) {
+      setUploadError(error instanceof Error ? error.message : 'PDF upload failed.');
       setUploadProgress(null);
     }
   };
-
   // Toggle Publish / Unpublish
   const handleTogglePublish = async (doc: PdfDocument) => {
     const action = doc.status === 'Published' ? 'unpublish' : 'publish';
@@ -330,9 +314,7 @@ export const AdminPanel: React.FC = () => {
         </form>
 
         <div className="mt-6 pt-4 border-t border-slate-100 dark:border-slate-800 text-[11px] text-slate-400 text-center">
-          Default deployment credentials:{' '}
-          <code className="text-sky-500 font-mono">admin</code> /{' '}
-          <code className="text-sky-500 font-mono">FormulaHub2026!</code>
+          Use the administrator credentials configured in the server environment. No default password is provided.
         </div>
       </div>
     );
@@ -825,7 +807,7 @@ export const AdminPanel: React.FC = () => {
                     className="w-full"
                   />
                   <p className="text-[11px] text-slate-400 mt-2">
-                    PDF format verified. If no custom file is selected, the system compiles a fresh vector PDF from the verified formula database.
+                    Select a real PDF file. The viewer will open the exact uploaded version; generated previews are not substituted for uploaded documents.
                   </p>
                 </div>
               </div>
