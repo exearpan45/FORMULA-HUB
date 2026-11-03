@@ -56,15 +56,33 @@ export const AdvancedPdfReader: React.FC<AdvancedPdfReaderProps> = ({
     return ALL_FORMULAS.slice(0, 25);
   }, [docMeta]);
 
-  // Generate the real PDF data URI on load
+  // Prefer the administrator-uploaded PDF; generate a local copy only for legacy catalogue entries.
   useEffect(() => {
-    try {
-      const doc = generatePdfDocument(docMeta, relevantFormulas);
-      const uri = doc.output('datauristring');
-      setPdfDataUri(uri);
-    } catch (e) {
-      console.error('Failed to generate PDF URI', e);
-    }
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    const loadPdf = async () => {
+      setPdfDataUri(null);
+      try {
+        const activeVersion = docMeta.versions?.find((version) => version.versionNumber === docMeta.currentVersion);
+        if (activeVersion?.fileUrl) { if (!cancelled) setPdfDataUri(activeVersion.fileUrl); return; }
+        if (activeVersion?.fileData?.startsWith('data:application/pdf')) {
+          const response = await fetch(activeVersion.fileData);
+          if (!response.ok) throw new Error('Unable to read the uploaded PDF.');
+          const blob = await response.blob();
+          const header = new TextDecoder().decode(await blob.slice(0, 5).arrayBuffer());
+          if (header !== '%PDF-') throw new Error('The uploaded file is not a valid PDF.');
+          objectUrl = URL.createObjectURL(blob);
+        } else {
+          const generated = generatePdfDocument(docMeta, relevantFormulas).output('blob');
+          const header = new TextDecoder().decode(await generated.slice(0, 5).arrayBuffer());
+          if (header !== '%PDF-') throw new Error('PDF generation returned an invalid document.');
+          objectUrl = URL.createObjectURL(generated);
+        }
+        if (!cancelled && objectUrl) setPdfDataUri(objectUrl);
+      } catch (error) { console.error('Unable to load PDF document:', error); if (!cancelled) setPdfDataUri(null); }
+    };
+    void loadPdf();
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [docMeta, relevantFormulas]);
 
   // Keyboard navigation
@@ -108,6 +126,20 @@ export const AdvancedPdfReader: React.FC<AdvancedPdfReaderProps> = ({
   };
 
   const handleDownload = () => {
+    const activeVersion = docMeta.versions?.find((version) => version.versionNumber === docMeta.currentVersion);
+    if (activeVersion?.fileData?.startsWith('data:application/pdf')) {
+      const anchor = window.document.createElement('a');
+      anchor.href = activeVersion.fileData;
+      anchor.download = docMeta.id + '-v' + docMeta.currentVersion + '.pdf';
+      anchor.click();
+      return;
+    }
+    if (activeVersion?.fileUrl) {
+      const anchor = window.document.createElement('a');
+      anchor.href = activeVersion.fileUrl; anchor.target = '_blank'; anchor.rel = 'noopener noreferrer';
+      anchor.download = docMeta.id + '-v' + docMeta.currentVersion + '.pdf'; anchor.click();
+      return;
+    }
     downloadPdf(docMeta, relevantFormulas);
   };
 
@@ -296,7 +328,7 @@ export const AdvancedPdfReader: React.FC<AdvancedPdfReaderProps> = ({
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search in this document..."
+                  placeholder="Filter formula outline..."
                   className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-slate-800 bg-slate-950 text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                 />
               </div>
@@ -347,14 +379,14 @@ export const AdvancedPdfReader: React.FC<AdvancedPdfReaderProps> = ({
           
           <div
             className="w-full max-w-4xl transition-all duration-200 flex flex-col items-center"
-            style={{ transform: `scale(${zoomLevel / 100})`, transformOrigin: 'top center' }}
+            style={{ width: '100%' }}
           >
             {/* Embedded Native / Blob PDF Iframe */}
             {pdfDataUri ? (
               <div className="w-full rounded-xl overflow-hidden shadow-2xl border border-slate-800 bg-white">
                 <iframe
                   id="pdf-render-frame"
-                  src={pdfDataUri}
+                  src={pdfDataUri + '#page=' + currentPage + '&zoom=' + zoomLevel}
                   title={docMeta.title}
                   className="w-full h-[85vh] border-0"
                 />
