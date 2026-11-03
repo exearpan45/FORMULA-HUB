@@ -9,13 +9,42 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // In-memory data store for server lifecycle
-let pdfCatalog: PdfDocument[] = JSON.parse(JSON.stringify(INITIAL_PDF_CATALOG));
+const DATA_DIR = process.env.DATA_DIR || path.resolve('data');
+const CATALOG_FILE = path.join(DATA_DIR, 'pdf-catalog.json');
+const ACTIVITY_FILE = path.join(DATA_DIR, 'activity-logs.json');
 
-let activityLogs: AdminActivityLog[] = [
+function readStore<T>(filePath: string, fallback: T): T {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
+  } catch (error) {
+    console.error('Unable to read persistent store:', filePath, error);
+    return fallback;
+  }
+}
+
+function persistStore(): void {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const writeAtomic = (filePath: string, value: unknown) => {
+      const temporaryPath = filePath + '.tmp';
+      fs.writeFileSync(temporaryPath, JSON.stringify(value), 'utf8');
+      fs.renameSync(temporaryPath, filePath);
+    };
+    writeAtomic(CATALOG_FILE, pdfCatalog);
+    writeAtomic(ACTIVITY_FILE, activityLogs);
+  } catch (error) {
+    console.error('Unable to persist Formula Hub data. Configure DATA_DIR on a persistent volume.', error);
+  }
+}
+
+let pdfCatalog: PdfDocument[] = readStore(CATALOG_FILE, JSON.parse(JSON.stringify(INITIAL_PDF_CATALOG)));
+
+let activityLogs: AdminActivityLog[] = readStore(ACTIVITY_FILE, [
   {
     id: 'act-1',
     action: 'PUBLISH',
@@ -43,16 +72,47 @@ let activityLogs: AdminActivityLog[] = [
     performedBy: 'admin',
     timestamp: '2026-08-14T11:00:00Z',
   },
-];
+]);
+
+// Persist successful API mutations atomically. For durable production storage, DATA_DIR must
+// point to a mounted persistent volume; container-local disks may be ephemeral.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const mutatingApiRequest = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/');
+  if (mutatingApiRequest) {
+    const originalJson = res.json.bind(res);
+    res.json = ((body: any) => {
+      if (res.statusCode >= 200 && res.statusCode < 300) persistStore();
+      return originalJson(body);
+    }) as typeof res.json;
+  }
+  next();
+});
 
 // Secure Admin Authentication
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-// Salt and hash default password: "FormulaHub2026!"
-const ADMIN_SALT = 'formula_hub_secure_salt_2026';
+const ADMIN_SALT = process.env.ADMIN_PASSWORD_SALT || '';
 function hashPassword(password: string): string {
-  return crypto.pbkdf2Sync(password, ADMIN_SALT, 10000, 64, 'sha512').toString('hex');
+  return crypto.pbkdf2Sync(password, ADMIN_SALT, 310000, 64, 'sha512').toString('hex');
 }
-const ADMIN_PASSWORD_HASH = hashPassword(process.env.ADMIN_PASSWORD || 'FormulaHub2026!');
+// Authentication is deliberately disabled until an operator supplies a password and a unique salt.
+const ADMIN_PASSWORD_HASH =
+  process.env.ADMIN_PASSWORD && ADMIN_SALT ? hashPassword(process.env.ADMIN_PASSWORD) : null;
+
+const MAX_PDF_BYTES = 20 * 1024 * 1024;
+function validatePdfData(fileData: unknown, declaredSize: unknown): { valid: boolean; error?: string; size?: number } {
+  if (typeof fileData !== 'string' || !fileData.startsWith('data:application/pdf;base64,')) {
+    return { valid: false, error: 'A real PDF file is required.' };
+  }
+  const encoded = fileData.slice('data:application/pdf;base64,'.length);
+  let bytes: Buffer;
+  try { bytes = Buffer.from(encoded, 'base64'); } catch { return { valid: false, error: 'PDF data is not valid base64.' }; }
+  if (bytes.length < 8 || bytes.subarray(0, 5).toString('ascii') !== '%PDF-') {
+    return { valid: false, error: 'Invalid PDF signature.' };
+  }
+  if (bytes.length > MAX_PDF_BYTES) return { valid: false, error: 'PDF exceeds the 20 MB upload limit.' };
+  if (Number(declaredSize) !== bytes.length) return { valid: false, error: 'Uploaded PDF size does not match its metadata.' };
+  return { valid: true, size: bytes.length };
+}
 
 // Active sessions: token -> { username, role, expiresAt }
 const activeSessions = new Map<string, { username: string; role: 'superadmin'; expiresAt: number }>();
@@ -84,8 +144,14 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Username and password required' });
   }
 
+  if (!ADMIN_PASSWORD_HASH) {
+    return res.status(503).json({ error: 'Administrator authentication is not configured. Set ADMIN_PASSWORD and ADMIN_PASSWORD_SALT on the server.' });
+  }
   const inputHash = hashPassword(password);
-  if (username !== ADMIN_USERNAME || inputHash !== ADMIN_PASSWORD_HASH) {
+  const expected = Buffer.from(ADMIN_PASSWORD_HASH, 'hex');
+  const supplied = Buffer.from(inputHash, 'hex');
+  const passwordMatches = expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied);
+  if (username !== ADMIN_USERNAME || !passwordMatches) {
     return res.status(401).json({ error: 'Invalid administrator credentials' });
   }
 
@@ -180,13 +246,8 @@ app.post('/api/admin/pdfs/upload', requireAdminAuth, (req: Request, res: Respons
     return res.status(400).json({ error: 'Missing required document fields' });
   }
 
-  // Validate PDF data if provided (must start with %PDF-)
-  if (fileData && typeof fileData === 'string') {
-    const isBase64Pdf = fileData.startsWith('data:application/pdf') || fileData.startsWith('%PDF-');
-    if (!isBase64Pdf && fileData.length < 50) {
-      return res.status(400).json({ error: 'Invalid PDF format. Expected valid PDF header %PDF-' });
-    }
-  }
+  const validation = validatePdfData(fileData, fileSize);
+  if (!validation.valid) return res.status(400).json({ error: validation.error });
 
   const user = (req as any).user;
   const newId = `pdf-${subject.toLowerCase()}-${Date.now().toString(36)}`;
@@ -257,13 +318,8 @@ app.put('/api/admin/pdfs/:id/replace', requireAdminAuth, (req: Request, res: Res
     return res.status(400).json({ error: 'New version number is required for replacement' });
   }
 
-  // Validate PDF format
-  if (fileData && typeof fileData === 'string') {
-    const isBase64Pdf = fileData.startsWith('data:application/pdf') || fileData.startsWith('%PDF-');
-    if (!isBase64Pdf && fileData.length < 50) {
-      return res.status(400).json({ error: 'Invalid PDF format. Expected valid PDF header %PDF-' });
-    }
-  }
+  const validation = validatePdfData(fileData, fileSize);
+  if (!validation.valid) return res.status(400).json({ error: validation.error });
 
   const user = (req as any).user;
   const newSize = Number(fileSize) || doc.fileSize;

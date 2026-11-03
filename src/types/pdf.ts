@@ -11,7 +11,8 @@ export interface PdfVersion {
   pageCount: number;
   uploadedBy: string;
   updateNotes: string;
-  fileData?: string; // base64 data URI or storage identifier
+  fileData?: string; // validated PDF data URI when stored inline
+  fileUrl?: string; // public URL for object-storage-backed PDF files
   checksum?: string;
 }
 
