@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://formula-hub.pages.dev/sitemap.xml

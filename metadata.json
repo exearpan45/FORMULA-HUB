@@ -1,0 +1,6 @@
+{
+  "name": "Formula Hub",
+  "description": "A Premium JEE & NEET Formula Reference Platform featuring verified Physics, Chemistry, and Mathematics equations, KaTeX mathematical typesetting, bed-friendly study mode, interactive revision tools, and offline access.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
