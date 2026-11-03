@@ -13,9 +13,38 @@ app.use(express.json({ limit: '30mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // In-memory data store for server lifecycle
-let pdfCatalog: PdfDocument[] = JSON.parse(JSON.stringify(INITIAL_PDF_CATALOG));
+const DATA_DIR = process.env.DATA_DIR || path.resolve('data');
+const CATALOG_FILE = path.join(DATA_DIR, 'pdf-catalog.json');
+const ACTIVITY_FILE = path.join(DATA_DIR, 'activity-logs.json');
 
-let activityLogs: AdminActivityLog[] = [
+function readStore<T>(filePath: string, fallback: T): T {
+  try {
+    if (!fs.existsSync(filePath)) return fallback;
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
+  } catch (error) {
+    console.error('Unable to read persistent store:', filePath, error);
+    return fallback;
+  }
+}
+
+function persistStore(): void {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    const writeAtomic = (filePath: string, value: unknown) => {
+      const temporaryPath = filePath + '.tmp';
+      fs.writeFileSync(temporaryPath, JSON.stringify(value), 'utf8');
+      fs.renameSync(temporaryPath, filePath);
+    };
+    writeAtomic(CATALOG_FILE, pdfCatalog);
+    writeAtomic(ACTIVITY_FILE, activityLogs);
+  } catch (error) {
+    console.error('Unable to persist Formula Hub data. Configure DATA_DIR on a persistent volume.', error);
+  }
+}
+
+let pdfCatalog: PdfDocument[] = readStore(CATALOG_FILE, JSON.parse(JSON.stringify(INITIAL_PDF_CATALOG)));
+
+let activityLogs: AdminActivityLog[] = readStore(ACTIVITY_FILE, [
   {
     id: 'act-1',
     action: 'PUBLISH',
@@ -43,7 +72,21 @@ let activityLogs: AdminActivityLog[] = [
     performedBy: 'admin',
     timestamp: '2026-08-14T11:00:00Z',
   },
-];
+]);
+
+// Persist successful API mutations atomically. For durable production storage, DATA_DIR must
+// point to a mounted persistent volume; container-local disks may be ephemeral.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const mutatingApiRequest = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/');
+  if (mutatingApiRequest) {
+    const originalJson = res.json.bind(res);
+    res.json = ((body: any) => {
+      if (res.statusCode >= 200 && res.statusCode < 300) persistStore();
+      return originalJson(body);
+    }) as typeof res.json;
+  }
+  next();
+});
 
 // Secure Admin Authentication
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
