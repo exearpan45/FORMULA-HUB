@@ -98,7 +98,7 @@ export const AdvancedPdfReader: React.FC<AdvancedPdfReaderProps> = ({
         toggleFullscreen();
       } else if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'j') {
         e.preventDefault();
-        setCurrentPage((prev) => Math.min(prev + 1, docMeta.pageCount));
+        setCurrentPage((prev) => Math.min(prev + 1, docMeta.pageCount || 999));
       } else if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCurrentPage((prev) => Math.max(prev - 1, 1));
@@ -229,7 +229,7 @@ export const AdvancedPdfReader: React.FC<AdvancedPdfReaderProps> = ({
             </span>
             <button
               onClick={() => setCurrentPage((p) => Math.min(docMeta.pageCount, p + 1))}
-              disabled={currentPage >= docMeta.pageCount}
+              disabled={docMeta.pageCount > 0 && currentPage >= docMeta.pageCount}
               className="p-0.5 text-slate-400 hover:text-white disabled:opacity-30"
             >
               <ChevronRight className="w-3.5 h-3.5" />
